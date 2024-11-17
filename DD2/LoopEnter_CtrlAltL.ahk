@@ -31,8 +31,8 @@ global scriptActive := true
 {
     Loop 
     {
-        ; If the script is active and the game window is active, send the Enter key repeatedly
-        if scriptActive && WinActive(gameWindowTitle) 
+        ; If the script is active and the game window exists, send the Enter key repeatedly
+        if scriptActive && WinExist(gameWindowTitle) 
         {
             ; Break the loop if the script is no longer active
             if (!scriptActive)
@@ -41,16 +41,16 @@ global scriptActive := true
             }
 
             ; Used to get past dialogue box in Dungeon Dreams 2 on slot machine
-            Send "{Enter}"
+            ControlSend("{Enter}",, gameWindowTitle)
 
             ; This is a workaround to re-enable the hooks
             InstallKeyboardAndMouseHooks()
 
             ; Used to get past dialogue box in Dungeon Dreams 2 on slot machine
-            Send "{Enter}"
+            ControlSend("{Enter}",, gameWindowTitle)
 
             ; Send and hold the Enter key for holdTime milliseconds
-            Send "{Enter Down}"
+            ControlSend("{Enter Down}",, gameWindowTitle)
             Sleep holdTime
             
             ; Break the loop if the script is no longer active
@@ -60,7 +60,7 @@ global scriptActive := true
             }
 
             ; Release the Enter key after holdTime milliseconds
-            Send "{Enter Up}"
+            ControlSend("{Enter Up}",, gameWindowTitle)
 
             ; Wait for waitTime milliseconds before looping again
             Sleep waitTime
@@ -72,7 +72,7 @@ global scriptActive := true
             }
 
             ; Used to get past dialogue box in Dungeon Dreams 2 on slot machine
-            Send "{Enter}"
+            ControlSend("{Enter}",, gameWindowTitle)
 
             ; Break the loop if the script is no longer active
             if (!scriptActive)
