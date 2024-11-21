@@ -21,11 +21,20 @@ class ClipboardManager {
         "guiTransparency", 235,
         "guiWidth", 300,
         "guiHeight", 400,
+        "thumbSize", 100, ; Thumbnail size in pixels
         "saveLocation", A_ScriptDir "\saved_clips.json",
         "configFile", A_ScriptDir "\settings.ini",
-        "tempImageDir", A_ScriptDir "\temp_images"
+        "tempImageDir", A_ScriptDir "\temp_images",
+        "toggleHotkey", "^!c",         ; Ctrl+Alt+C
+        "pasteHotkey", "^!v",          ; Ctrl+Alt+V
+        "autoSave", true,
+        "startMinimized", false,
+        "alwaysOnTop", true
     )
     
+    ; Add setting controls references
+    settingsControls := Map()
+
     ; Storage for clipboard items
     textItems := []        ; For text and files
     imageItems := []       ; For images
@@ -34,6 +43,8 @@ class ClipboardManager {
     ; GUI references
     mainGui := {}
     settingsGui := {}
+    textList := {}
+    imageList := {}
     
     __New() {
         this.LoadSettings()
@@ -43,7 +54,7 @@ class ClipboardManager {
         
         ; Start monitoring clipboard
         A_TrayMenu.Add("Settings", (*) => this.ShowSettings())
-        A_TrayMenu.Add("Exit", (*) => ExitApp())
+        A_TrayMenu.Add("Exit", (*) => this.CleanupAndExit())
     }
     
     InitializeStorage() {
@@ -134,10 +145,167 @@ class ClipboardManager {
 
     InitializeGUI() {
         ; Main GUI setup
-        this.mainGui := Gui("+Resize +AlwaysOnTop -Caption")
-        ; ... GUI controls will go here
+        this.mainGui := Gui("+Resize +AlwaysOnTop -DPIScale", "Clipboard Manager")
+        this.mainGui.OnEvent("Size", (*) => this.ResizeGUI())
+
+        ; Add tab control
+        tabs := this.mainGui.Add("Tab3", "w" this.Settings["guiWidth"] " h" this.Settings["guiHeight"], ["Text", "Images"])
+
+        ; Text tab
+        tabs.UseTab(1)
+        this.textList := this.mainGui.Add("ListView", "w" this.Settings["guiWidth"]-20 " h" this.Settings["guiHeight"]-40, ["Time", "Content"])
+        this.textList.OnEvent("DoubleClick", (*) => this.PasteSelectedText())
+        this.textList.OnEvent("ItemClick", (*) => this.PreviewText())
+
+        ; Images Tab
+        tabs.UseTab(2)
+        this.imageList := this.mainGui.Add("ListView", "w" this.Settings["guiWidth"]-20 " h" this.Settings["guiHeight"]-40, ["Time", "Size", "Preview"])
+        this.imageList.OnEvent("DoubleClick", (*) => this.PasteSelectedImage())
+
+        ; Make lists accept drag operations
+        this.SetupDragAndDrop()
+
+        ; Set GUI transparency
+        WinSetTransparent(this.Settings["guiTransparency"], this.mainGui)
+    }
+
+    SetupDragAndDrop() {
+        ; Enable drag-drop from both lists
+        this.textList.OnEvent("ItemClick", (*) => this.StartDrag("text"))
+        this.imageList.OnEvent("ItemClick", (*) => this.StartDrag("image"))
+    }
+
+    StartDrag(type) {
+        if !GetKeyState("LButton")
+            return
+        
+        if (type = "text") {
+            selected := this.textList.GetText(this.textList.GetNext())
+            if selected
+                this.DoDragDrop(selected, "text")
+        } else {
+            selected := this.imageList.GetNext()
+            if selected
+                this.DoDragDrop(this.imageItems[selected], "image")
+        }
     }
     
+    DoDragDrop(data, type) {
+        ; Implementation for drag-drop operation
+        static DROPEFFECT_COPY := 1
+
+        if (type = "text") {
+            ; Set clipboard format for text
+            A_Clipboard := data
+        } else {
+            ; Set clipboard format for image
+            try {
+                hBitmap := LoadPicture(data["path"])
+                ; Set up clipboard with image data
+                DllCall("OpenClipboard", "ptr", 0)
+                DllCall("EmptyClipboard")
+                DllCall("SetClipboardData", "uint", 2, "ptr", hBitmap)
+                DllCall("CloseClipboard")
+            }
+        }
+
+        ; Initiate drag operation 
+        DllCall("OleInitialize", "ptr", 0)
+        DllCall("RegisterDragDrop", "ptr", this.mainGui.Hwnd, "ptr", this.CreateDropTarget())
+    }
+
+    SaveImage(hBitmap, filename) {
+        try {
+            ; Save bitmap to file using GDI+
+            pBitmap := this.CreateBitmapFromHandle(hBitmap)
+            if !pBitmap
+                throw Error("Failed to create bitmap")
+
+            ; Save as PNG
+            Gdip_SaveBitmapToFile(pBitmap, filename)
+
+            ; Create thumbnail
+            thumbFile := filename ".thumb.png"
+            thumbBitmap := this.CreateThumbnail(pBitmap)
+            Gdip_SaveBitmapToFile(thumbBitmap, thumbFile)
+
+            ; Cleanup
+            Gdip_DisposeImage(pBitmap)
+            Gdip_DisposeImage(thumbBitmap)
+
+            return true
+        } catch as err {
+            this.ShowNotification("Error saving image: " . err.Message)
+            return false
+        }
+    }
+
+    CreateThumbnail(pBitmap) {
+        ; Create thumbnail from bitmap using GDI+
+        width := this.Settings["thumbSize"]
+        height := this.Settings["thumbSize"]
+
+        ; Calculate aspect ratio
+        origWidth := Gdip_GetImageWidth(pBitmap)
+        origHeight := Gdip_GetImageHeight(pBitmap)
+        ratio := Min(width / origWidth, height / origHeight)
+
+        ; Create new bitmap with calculated dimensions
+        newWidth := Round(origWidth * ratio)
+        newHeight := Round(origHeight * ratio)
+
+        thumbBitmap := Gdip_CreateBitmap(newWidth, newHeight)
+        graphics := Gdip_GraphicsFromImage(thumbBitmap)
+
+        ; Set high quality scaling
+        Gdip_SetInterpolationMode(graphics, 7) ; InterpolationModeHighQuality
+
+        ; Draw scaled image
+        Gdip_DrawImage(graphics, pBitmap, 0, 0, newWidth, newHeight)
+
+        ; Clean up
+        Gdip_DeleteGraphics(graphics)
+
+        return thumbBitmap
+    }
+
+    UpdateGUI() {
+        ; Update text list
+        this.textList.Delete()
+        for item in this.textItems
+            this.textList.Add(, FormatTime(item["timestamp"], "HH:mm:ss"), this.TruncateText(item["content"], 50))
+
+        ; Update image list
+        this.imageList.Delete()
+        for item in this.imageItems {
+            size := Format("{:.1f}MB", item["size"] / 1048576)
+            this.imageList.Add(, FormatTime(item["timestamp"], "HH:mm:ss"), size)
+            ; Load thumbnail into list
+            if FileExists(item["thumb"])
+                this.imageList.SetImageList(IL_Create(1, 5, 0))
+                IL_Add(this.imageList.ImageList(), item["thumb"])
+        }
+    }
+
+    TruncateText(text, length) {
+        return StrLen(text) > length ? SubStr(text, 1, length) "..." : text
+    }
+
+    ResizeGUI() {
+        try {
+            if !this.mainGui.Hwnd
+                return
+
+            ; Get new dimensions
+            newWidth := this.mainGui.Position.W
+            newHeight := this.mainGui.Position.H
+
+            ; Resize tab control
+            this.textList.Move(,, newWidth-20, newHeight-40)
+            this.imageList.Move(,, newWidth-20, newHeight-40)
+        }
+    }
+
     SetupHotkeys() {
         ; Define default hotkeys
         HotKey("^!c", (*) => this.ToggleGUI())        ; Ctrl+Alt+C to toggle GUI
@@ -164,10 +332,6 @@ class ClipboardManager {
             this.AddToBuffer(text, "text")
     }
     
-    HandleImageClip() {
-        ; Handle image clipboard content
-        ; Will implement image saving and thumbnail generation
-    }
     
     HandleFileClip() {
         ; Handle file paths
@@ -181,21 +345,249 @@ class ClipboardManager {
     
     LoadSettings() {
         ; Load settings from file
-        try {
-            ; Implementation will go here
+        if FileExist(this.Settings["configFile"]) {
+            try {
+                ; Load each setting from INI
+                for key in this.Settings {
+                    value := IniRead(this.Settings["configFile"], "Settings", key, this.Settings[key])
+                    this.Settings[key] := value
+                }
+            }
         }
     }
     
     SaveSettings() {
         ; Save current settings to file
+        ; Update settings from controls
+        for key, control in this.settingsControls {
+            if (key = "maxImageSize")
+                this.Settings[key] := control.Value * 1048576  ; Convert MB to bytes
+            else
+                this.Settings[key] := control.Value
+        }
+        
+        ; Save to INI file
+        for key, value in this.Settings {
+            IniWrite(value, this.Settings["configFile"], "Settings", key)
+        }
+        
+        ; Apply new settings
+        this.ApplySettings()
+        this.settingsGui.Hide()
     }
     
     ShowSettings() {
         ; Create and show settings GUI
+    ; Create settings GUI
+    if !this.settingsGui {
+        this.settingsGui := Gui("+Owner" this.mainGui.Hwnd, "Clipboard Manager Settings")
+        
+        ; Create tabs for organization
+        tabs := this.settingsGui.Add("Tab3", "w400 h500", ["General", "Hotkeys", "Storage"])
+        
+        ; === General Tab ===
+        tabs.UseTab(1)
+        this.settingsGui.Add("GroupBox", "w380 h160", "GUI Settings")
+        this.settingsGui.Add("Text",, "Transparency:")
+        this.settingsControls["guiTransparency"] := this.settingsGui.Add("Slider", "w200", "Range0-255")
+        this.settingsControls["guiTransparency"].Value := this.Settings["guiTransparency"]
+        
+        this.settingsControls["alwaysOnTop"] := this.settingsGui.Add("Checkbox",, "Always on Top")
+        this.settingsControls["alwaysOnTop"].Value := this.Settings["alwaysOnTop"]
+        
+        this.settingsControls["startMinimized"] := this.settingsGui.Add("Checkbox",, "Start Minimized")
+        this.settingsControls["startMinimized"].Value := this.Settings["startMinimized"]
+        
+        this.settingsControls["autoSave"] := this.settingsGui.Add("Checkbox",, "Auto-save clips")
+        this.settingsControls["autoSave"].Value := this.Settings["autoSave"]
+        
+        ; === Hotkeys Tab ===
+        tabs.UseTab(2)
+        this.settingsGui.Add("GroupBox", "w380 h160", "Hotkey Configuration")
+        
+        this.settingsGui.Add("Text",, "Toggle GUI:")
+        this.settingsControls["toggleHotkey"] := this.settingsGui.Add("Hotkey", "w200")
+        this.settingsControls["toggleHotkey"].Value := this.Settings["toggleHotkey"]
+        
+        this.settingsGui.Add("Text",, "Quick Paste:")
+        this.settingsControls["pasteHotkey"] := this.settingsGui.Add("Hotkey", "w200")
+        this.settingsControls["pasteHotkey"].Value := this.Settings["pasteHotkey"]
+        
+        ; === Storage Tab ===
+        tabs.UseTab(3)
+        this.settingsGui.Add("GroupBox", "w380 h200", "Storage Limits")
+        
+        this.settingsGui.Add("Text",, "Max Text Items:")
+        this.settingsControls["maxTextItems"] := this.settingsGui.Add("Edit", "w60")
+        this.settingsControls["maxTextItems"].Value := this.Settings["maxTextItems"]
+        
+        this.settingsGui.Add("Text",, "Max Image Items:")
+        this.settingsControls["maxImageItems"] := this.settingsGui.Add("Edit", "w60")
+        this.settingsControls["maxImageItems"].Value := this.Settings["maxImageItems"]
+        
+        this.settingsGui.Add("Text",, "Max Single Image Size (MB):")
+        this.settingsControls["maxImageSize"] := this.settingsGui.Add("Edit", "w60")
+        this.settingsControls["maxImageSize"].Value := this.Settings["maxImageSize"] / 1048576
+        
+        ; Add Save/Cancel buttons
+        this.settingsGui.Add("Button", "Default w80", "Save").OnEvent("Click", (*) => this.SaveSettings())
+        this.settingsGui.Add("Button", "x+10 w80", "Cancel").OnEvent("Click", (*) => this.settingsGui.Hide())
+    }
+    
+    this.settingsGui.Show()
+    }
+
+    ApplySettings() {
+        ; Apply GUI settings
+        if this.mainGui {
+            WinSetTransparent(this.Settings["guiTransparency"], this.mainGui)
+            WinSetAlwaysOnTop(this.Settings["alwaysOnTop"], this.mainGui)
+        }
+        
+        ; Update hotkeys
+        this.SetupHotkeys()
+        
+        ; Apply size limits
+        this.ManageBuffers()
+    }
+
+    SetupContextMenus() {
+        ; Text list context menu
+        this.textList.OnEvent("ContextMenu", (*) => this.ShowTextContextMenu())
+        
+        ; Image list context menu
+        this.imageList.OnEvent("ContextMenu", (*) => this.ShowImageContextMenu())
+    }
+
+    ShowTextContextMenu() {
+        selected := this.textList.GetNext()
+        if !selected
+            return
+            
+        menu := Menu()
+        menu.Add("Copy", (*) => this.CopySelectedText())
+        menu.Add("Delete", (*) => this.DeleteSelectedText())
+        menu.Add("Save As...", (*) => this.SaveTextAs())
+        menu.Show()
+    }
+
+    ShowImageContextMenu() {
+        selected := this.imageList.GetNext()
+        if !selected
+            return
+            
+        menu := Menu()
+        menu.Add("Copy", (*) => this.CopySelectedImage())
+        menu.Add("Delete", (*) => this.DeleteSelectedImage())
+        menu.Add("Save As...", (*) => this.SaveImageAs())
+        menu.Add("View Full Size", (*) => this.ViewFullImage())
+        menu.Show()
+    }
+
+    SaveClips() {
+        if !this.Settings["autoSave"]
+            return
+            
+        try {
+            data := Map(
+                "textItems", this.textItems,
+                "imageItems", this.imageItems
+            )
+            
+            jsonText := JSON.Stringify(data)
+            FileWrite(jsonText, this.Settings["saveLocation"])
+        }
+    }
+
+    LoadClips() {
+        if !FileExist(this.Settings["saveLocation"])
+            return
+            
+        try {
+            jsonText := FileRead(this.Settings["saveLocation"])
+            data := JSON.Parse(jsonText)
+            
+            ; Validate and load text items
+            if IsObject(data["textItems"])
+                this.textItems := data["textItems"]
+                
+            ; Validate and load image items
+            if IsObject(data["imageItems"]) {
+                ; Only load images that still exist
+                this.imageItems := []
+                for item in data["imageItems"] {
+                    if FileExist(item["path"])
+                        this.imageItems.Push(item)
+                }
+            }
+            
+            this.UpdateGUI()
+        }
+    }
+
+    SaveTextAs() {
+        selected := this.textList.GetNext()
+        if !selected
+            return
+            
+        filename := FileSelect("S", , "Save Text As", "Text Files (*.txt)")
+        if filename {
+            FileWrite(this.textItems[selected]["content"], filename)
+        }
+    }
+
+    SaveImageAs() {
+        selected := this.imageList.GetNext()
+        if !selected
+            return
+            
+        filename := FileSelect("S", , "Save Image As", "PNG Files (*.png)")
+        if filename {
+            FileCopy(this.imageItems[selected]["path"], filename)
+        }
+    }
+
+    ViewFullImage() {
+        selected := this.imageList.GetNext()
+        if !selected
+            return
+            
+        ; Create a simple viewer GUI
+        viewer := Gui("+Resize", "Image Viewer")
+        viewer.Add("Picture", "w800 h600", this.imageItems[selected]["path"])
+        viewer.Show()
+    }
+
+    DeleteSelectedText() {
+        selected := this.textList.GetNext()
+        if selected {
+            this.textItems.RemoveAt(selected)
+            this.UpdateGUI()
+            this.SaveClips()
+        }
+    }
+
+    DeleteSelectedImage() {
+        selected := this.imageList.GetNext()
+        if selected {
+            ; Delete files
+            try {
+                FileDelete(this.imageItems[selected]["path"])
+                FileDelete(this.imageItems[selected]["thumb"])
+            }
+            
+            this.currentImageSize -= this.imageItems[selected]["size"]
+            this.imageItems.RemoveAt(selected)
+            this.UpdateGUI()
+            this.SaveClips()
+        }
     }
 }
 
 ; ========== Main Program ==========
+; Initialize GDI+ for image handling
+Gdip_Startup()
+
 ; Initialize the clipboard manager
 clipManager := ClipboardManager()
 
@@ -203,4 +595,7 @@ clipManager := ClipboardManager()
 OnClipboardChange((*) => clipManager.OnClipboardChange(Type))
 
 ; Ensure cleanup on script exit
-OnExit((*) => clipManager.CleanupAndExit())
+OnExit((*) => {
+    clipManager.CleanupAndExit()
+    Gdip_Shutdown()
+})
